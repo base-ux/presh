@@ -1,0 +1,197 @@
+#!/bin/sh
+
+# Unset all aliases
+'unalias' -a
+
+# Ensure 'command' is not a user function
+unset -f command
+
+# Use shell dependent 'local' definition
+local="$(command -v local)"
+test -n "${local}" || local="$(command -v typeset)"
+alias local="${local}"
+
+# Program name
+PROG="$(basename -- "$0")"
+
+####
+
+AWKSCR="$(cat << 'AWKEOF'
+#% include "presh.awk"
+AWKEOF
+)"
+
+####
+
+# Print usage information
+usage ()
+{
+    ! printf "Usage: %s [options] infile\n" "${PROG}"
+}
+
+# Print help information
+usage_help ()
+{
+    usage
+    cat << EOF
+
+    -D var	define 'var'
+    -U var	undefine 'var'
+    -I dir	add 'dir' to the search list
+    -o outfile	output file name
+
+    infile	input file name
+EOF
+    exit 0
+}
+
+####
+
+# Parse command line options
+get_options ()
+{
+    local opt=""
+
+    case "$1" in ( '-?' | '-help' | '--help' ) usage_help ;; esac
+    while getopts ":D:I:U:o:" opt ; do
+	case "${opt}" in
+	    ( 'D' ) add_define  "${OPTARG}" ;;
+	    ( 'I' ) add_inclist "${OPTARG}" ;;
+	    ( 'U' ) add_undef   "${OPTARG}" ;;
+	    ( 'o' ) OUTFILE="${OPTARG}" ;;
+	    ( ':' ) err "missing argument for option -- '${OPTARG}'" || usage ;;
+	    ( '?' ) err "unknown option -- '${OPTARG}'" || usage ;;
+	    (  *  ) err "no handler for option '${opt}'" ;;
+	esac || return 1
+    done
+    shift $(( OPTIND - 1 ))
+    test $# -le 1 && INFILE="${1:-}" || err "too many arguments" || usage
+}
+
+####
+
+# Print error message
+err ()
+{
+    ! printf "%s: error: %s\n" "${PROG}" "$*" >&2
+}
+
+# Execute command
+cmd ()
+{
+    command ${1+"$@"} 2>/dev/null
+}
+
+# Check variable name
+check_vname ()
+{
+    case "$1" in
+	( '' | '_' | [!A-Za-z_]* | [A-Za-z_]*[!A-Za-z0-9_]* )
+	    err "illegal variable name: '$1'" ;;
+    esac
+}
+
+# Add directory to include list
+add_inclist ()
+{
+    test -n "$1" && INCLIST="${INCLIST:+"${INCLIST}\n"}$1" || true
+}
+
+# Add variable to define list
+add_define ()
+{
+    local var="$1"
+    local val="1"	# Default value
+    local x=""
+
+    case "${var}" in ( *'='* ) val="${var#*=}" ; var="${var%%=*}" ;; esac
+    check_vname "${var}" &&
+    while : ; do
+	case "${val}" in	# Escape backslashes in value
+	    ( *"\\"* ) x="${x}${val%%\\*}\\\\" ; val="${val#*\\}" ;;
+	    ( * )      val="${x}${val}" ; break ;;
+	esac
+    done &&
+    DEFLIST="${DEFLIST:+"${DEFLIST}\n"}${var}=\"${val}\""
+}
+
+# Add variable to undefine list
+add_undef ()
+{
+    check_vname "$1" && UNDLIST="${UNDLIST:+"${UNDLIST}\n"}$1"
+}
+
+####
+
+# Process subroutine
+process ()
+{
+    "${AWK}" \
+	-v INCLIST="${INCLIST}" \
+	-v DEFLIST="${DEFLIST}" \
+	-v UNDLIST="${UNDLIST}" \
+	"${AWKSCR}" \
+	"${INFILE:--}"
+}
+
+####
+
+# Initialization subroutine
+init ()
+{
+    local cmd=""
+
+    set -o noglob	# Do not expand pathnames
+    INCLIST=""		# List of include directories
+    DEFLIST=""		# List of defined variables
+    UNDLIST=""		# List of undefined variables
+    INFILE=""		# Input file (empty for 'stdin')
+    OUTFILE=""		# Output file (empty for 'stdout')
+
+    for cmd in mawk gawk nawk awk ; do
+	AWK="$(command -v ${cmd})" && break
+    done
+    test -n "${AWK}" || err "can't find awk program" || return 1
+}
+
+# Startup subroutine
+startup ()
+{
+    # Check input file
+    case "${INFILE}" in ( '-' ) INFILE="" ;; esac
+
+    # Check output file
+    case "${OUTFILE}" in ( '-' ) OUTFILE="" ;; esac
+    if test -n "${OUTFILE}" ; then
+	# If output file is set then try to create it
+	( : > "${OUTFILE}" ) 2>/dev/null ||
+	    err "can't create output file '${OUTFILE}'" || return 1
+	exec 1> "${OUTFILE}"	# Open output file
+    fi
+}
+
+# Clean up the staff and exit with error
+clean_fail ()
+{
+    test -n "${OUTFILE}" && cmd rm -f "${OUTFILE}"
+    fail "${1:-1}"
+}
+
+# Exit with error code
+fail ()
+{
+    exit "${1:-1}"
+}
+
+####
+
+# Main subroutine
+main ()
+{
+    init && get_options "$@" && startup || fail
+    trap 'clean_fail 130' HUP INT TERM
+    process || clean_fail
+}
+
+# Call main subroutine
+main "$@"
